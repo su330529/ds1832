@@ -1,0 +1,129 @@
+name: build-linux
+
+# cross-compile the iOS app on a Linux runner with Theos (no Xcode, no macOS queue)
+on:
+  push:
+    paths:
+      - '.github/workflows/build-linux.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install deps
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends make git curl xz-utils zip unzip ca-certificates clang lld
+          clang --version
+          ld64.lld --version
+
+      - name: fetch theos
+        run: |
+          set -eux
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          ls "$HOME/theos"
+
+      - name: fetch ios sdk
+        run: |
+          set -eux
+          mkdir -p "$HOME/theos/sdks"
+          cd "$HOME/theos/sdks"
+          ok=0
+          for url in \
+            https://github.com/theos/sdks/releases/download/16.5/iPhoneOS16.5.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/16.4/iPhoneOS16.4.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/17.0/iPhoneOS17.0.sdk.tar.xz ; do
+            echo "trying $url"
+            if curl -fL --retry 2 -o sdk.tar.xz "$url"; then
+              if tar -tf sdk.tar.xz >/dev/null 2>&1; then
+                tar -xf sdk.tar.xz
+                ok=1
+                break
+              fi
+            fi
+          done
+          if [ "$ok" != "1" ]; then
+            echo "SDK DOWNLOAD FAILED - listing release assets"
+            curl -sL https://api.github.com/repos/theos/sdks/releases | head -c 4000 || true
+            exit 1
+          fi
+          ls -la
+
+      - name: unpack project
+        run: |
+          set -eux
+          mkdir -p work
+          cd work
+          unzip -q ../ds1832-source.zip
+          ls
+
+      - name: write theos makefile
+        run: |
+          set -eux
+          cd work
+          cat > Makefile <<'EOF'
+          TARGET := iphone:clang:latest:15.0
+          ARCHS := arm64
+
+          include $(THEOS)/makefiles/common.mk
+
+          APPLICATION_NAME = ds1832
+
+          ds1832_FILES = app/main.m \
+                         src/ds_log.c src/ds_race.c src/ds_oracle.c src/ds_exploit.c src/cfm_backend.c \
+                         cfm-cheat/src/kwr.c cfm-cheat/src/macho.c cfm-cheat/src/il2cpp.c \
+                         cfm-cheat/src/aim.c cfm-cheat/src/dump.c cfm-cheat/src/host.c \
+                         cfm-cheat/src/overlay.m cfm-cheat/src/input_aim.m
+
+          ds1832_FRAMEWORKS = UIKit Foundation CoreFoundation CoreGraphics QuartzCore
+          ds1832_CFLAGS = -fobjc-arc -Isrc -Icfm-cheat/src -Wno-unused-parameter -Wno-unused-variable
+          ds1832_INSTALL_PATH = /Applications
+
+          include $(THEOS_MAKE_PATH)/application.mk
+          EOF
+          sed -i 's/^          //' Makefile
+          cat Makefile
+
+      - name: build
+        run: |
+          set -eux
+          export THEOS="$HOME/theos"
+          export PATH="$THEOS/bin:$PATH"
+          cd work
+          make -j4 2>&1 | tee build.log
+          echo "--- staged files ---"
+          find _ -maxdepth 4 -name '*.app' -print 2>/dev/null || true
+          ls -R _ 2>/dev/null | head -50 || true
+
+      - name: package ipa
+        run: |
+          set -eux
+          cd work
+          APP=$(find _ -maxdepth 4 -name '*.app' | head -1)
+          if [ -z "$APP" ]; then echo "NO .app PRODUCED"; exit 1; fi
+          echo "app: $APP"
+          rm -rf Payload ds1832.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry ds1832.ipa Payload
+          ls -la ds1832.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ds1832-ipa-linux
+          path: work/ds1832.ipa
+          if-no-files-found: warn
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: work/build.log
+          if-no-files-found: warn
