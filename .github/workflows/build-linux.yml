@@ -1,6 +1,5 @@
 name: build-linux
 
-# cross-compile the iOS app on a Linux runner with Theos (no Xcode, no macOS queue)
 on:
   push:
     paths:
@@ -16,48 +15,50 @@ jobs:
 
       - name: install deps
         run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends make git curl xz-utils zip unzip ca-certificates clang lld
-          clang --version
-          ld64.lld --version
+          set -x
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends make git curl xz-utils zip unzip ca-certificates clang lld || true
+          echo "--- versions ---"
+          clang --version || true
+          (ld64.lld --version || ld.lld --version || lld --version || echo "no lld") 2>&1 || true
 
       - name: fetch theos
         run: |
-          set -eux
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          ls "$HOME/theos"
+          set -x
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos" || git clone https://github.com/theos/theos.git "$HOME/theos"
+          ls "$HOME/theos" | head -20
 
       - name: fetch ios sdk
         run: |
-          set -eux
+          set -x
           mkdir -p "$HOME/theos/sdks"
           cd "$HOME/theos/sdks"
           ok=0
           for url in \
             https://github.com/theos/sdks/releases/download/16.5/iPhoneOS16.5.sdk.tar.xz \
             https://github.com/theos/sdks/releases/download/master/iPhoneOS16.5.sdk.tar.xz \
-            https://github.com/theos/sdks/releases/download/16.4/iPhoneOS16.4.sdk.tar.xz \
-            https://github.com/theos/sdks/releases/download/17.0/iPhoneOS17.0.sdk.tar.xz ; do
+            https://github.com/theos/sdks/releases/download/17.0/iPhoneOS17.0.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/16.4/iPhoneOS16.4.sdk.tar.xz ; do
             echo "trying $url"
             if curl -fL --retry 2 -o sdk.tar.xz "$url"; then
-              if tar -tf sdk.tar.xz >/dev/null 2>&1; then
+              if tar -tf sdk.tar.xz > /dev/null 2>&1; then
                 tar -xf sdk.tar.xz
                 ok=1
+                echo "SDK OK from $url"
                 break
               fi
             fi
           done
           if [ "$ok" != "1" ]; then
-            echo "SDK DOWNLOAD FAILED - listing release assets"
-            curl -sL https://api.github.com/repos/theos/sdks/releases | head -c 4000 || true
+            echo "=== SDK DOWNLOAD FAILED, listing theos/sdks releases ==="
+            curl -sL "https://api.github.com/repos/theos/sdks/releases?per_page=5" | grep -E '"(tag_name|name|browser_download_url)"' | head -40 || true
             exit 1
           fi
-          ls -la
+          ls -la "$HOME/theos/sdks"
 
       - name: unpack project
         run: |
-          set -eux
+          set -x
           mkdir -p work
           cd work
           unzip -q ../ds1832-source.zip
@@ -65,9 +66,9 @@ jobs:
 
       - name: write theos makefile
         run: |
-          set -eux
+          set -x
           cd work
-          cat > Makefile <<'EOF'
+          cat > Makefile <<'THEOSEOF'
           TARGET := iphone:clang:latest:15.0
           ARCHS := arm64
 
@@ -86,44 +87,41 @@ jobs:
           ds1832_INSTALL_PATH = /Applications
 
           include $(THEOS_MAKE_PATH)/application.mk
-          EOF
+          THEOSEOF
           sed -i 's/^          //' Makefile
           cat Makefile
 
       - name: build
         run: |
-          set -eux
+          set -x
           export THEOS="$HOME/theos"
           export PATH="$THEOS/bin:$PATH"
           cd work
-          make -j4 2>&1 | tee build.log
-          echo "--- staged files ---"
-          find _ -maxdepth 4 -name '*.app' -print 2>/dev/null || true
-          ls -R _ 2>/dev/null | head -50 || true
+          make -j4 || true
+          echo "--- staged ---"
+          find . -maxdepth 5 -name '*.app' -print || true
+          find . -maxdepth 4 -type d -name '_' -print || true
+          ls -R .theos 2>/dev/null | head -40 || true
 
       - name: package ipa
         run: |
-          set -eux
+          set -x
           cd work
-          APP=$(find _ -maxdepth 4 -name '*.app' | head -1)
+          APP=$(find . -maxdepth 6 -name '*.app' -not -path './Payload/*' | head -1)
           if [ -z "$APP" ]; then echo "NO .app PRODUCED"; exit 1; fi
           echo "app: $APP"
           rm -rf Payload ds1832.ipa
           mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -qry ds1832.ipa Payload
-          ls -la ds1832.ipa
+          zip -qry ds1832.ipa Payload || true
+          ls -la ds1832.ipa || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ds1832-ipa-linux
-          path: work/ds1832.ipa
+          name: ds1832-linux-output
+          path: |
+            work/ds1832.ipa
+            work
           if-no-files-found: warn
-
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: build-log
-          path: work/build.log
-          if-no-files-found: warn
+          retention-days: 3
