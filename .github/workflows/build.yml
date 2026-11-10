@@ -6,31 +6,64 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: locate project
+      - name: install toolchain
         run: |
           set -euo pipefail
-          if [ -f ds1832-source.zip ]; then
-            unzip -q -o ds1832-source.zip -d work
-          fi
-          PROJ=$(find . -name 'ds1832.xcodeproj' -maxdepth 5 -type d | head -1)
-          test -n "$PROJ"
-          echo "ROOT=$(dirname "$PROJ")" >> "$GITHUB_ENV"
-          xcodebuild -version
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld zip unzip
 
-      - name: build unsigned ipa
+      - name: fetch iOS SDK
         run: |
           set -euo pipefail
-          cd "$ROOT"
-          chmod +x build.sh
-          ./build.sh
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks sdk
+          cd sdk
+          git sparse-checkout set iPhoneOS16.5.sdk
+          ls -1
+          du -sh iPhoneOS16.5.sdk
+
+      - name: unpack project
+        run: |
+          set -euo pipefail
+          unzip -q -o ds1832-source.zip -d work
+          ls work
+
+      - name: compile
+        run: |
+          set -euo pipefail
+          SDK="$GITHUB_WORKSPACE/sdk/iPhoneOS16.5.sdk"
+          cd work
+          CFLAGS="-target arm64-apple-ios15.0 -isysroot $SDK -O1 -I src -I cfm-cheat/src -Wall -Wno-unused-parameter -Wno-unused-variable"
+          mkdir -p obj
+          for f in src/ds_log.c src/ds_race.c src/ds_oracle.c src/ds_exploit.c src/cfm_backend.c cfm-cheat/src/kwr.c cfm-cheat/src/macho.c cfm-cheat/src/il2cpp.c cfm-cheat/src/aim.c cfm-cheat/src/dump.c cfm-cheat/src/host.c; do
+            clang $CFLAGS -c "$f" -o "obj/$(basename $f .c).o"
+          done
+          for f in app/main.m cfm-cheat/src/overlay.m cfm-cheat/src/input_aim.m; do
+            clang $CFLAGS -fobjc-arc -c "$f" -o "obj/$(basename $f .m).o"
+          done
+          clang -target arm64-apple-ios15.0 -isysroot "$SDK" -fuse-ld=lld obj/*.o \
+            -framework UIKit -framework Foundation -framework IOSurface \
+            -framework CoreGraphics -framework QuartzCore -framework CoreFoundation \
+            -o ds1832
+          file ds1832 || true
+
+      - name: package ipa
+        run: |
+          set -euo pipefail
+          cd work
+          rm -rf Payload ds1832.ipa
+          mkdir -p Payload/ds1832.app
+          cp ds1832 Payload/ds1832.app/
+          cp app/Info.plist Payload/ds1832.app/Info.plist
+          printf 'APPL????' > Payload/ds1832.app/PkgInfo
+          zip -qry ds1832.ipa Payload
           ls -la ds1832.ipa
 
       - uses: actions/upload-artifact@v4
         with:
           name: ds1832-ipa
-          path: ${{ env.ROOT }}/ds1832.ipa
+          path: work/ds1832.ipa
           if-no-files-found: error
