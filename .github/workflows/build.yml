@@ -1,0 +1,39 @@
+name: build-ipa
+
+# 涓€閿嚭 ipa锛屼笉闇€瑕?Mac銆?# 瑙﹀彂鏂瑰紡锛氱綉椤典笂鐐?Actions 鈫?build-ipa 鈫?Run workflow锛屾垨鑰呯洿鎺?push銆?on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 瑙ｅ寘婧愮爜锛堝悓鏃朵篃鏀寔鐩存帴鐢ㄤ粨搴撻噷鐨勬簮鐮侊級
+        run: |
+          set -euo pipefail
+          if [ -f ds1832-source.zip ]; then
+            echo "found ds1832-source.zip, unpacking"
+            unzip -q -o ds1832-source.zip -d work
+          fi
+          PROJ=$(find . -name 'ds1832.xcodeproj' -maxdepth 5 -type d | head -1)
+          if [ -z "$PROJ" ]; then
+            echo "鎵句笉鍒?ds1832.xcodeproj"; exit 1
+          fi
+          echo "project: $PROJ"
+          echo "ROOT=$(dirname "$PROJ")" >> "$GITHUB_ENV"
+
+      - name: 缂栬瘧骞舵墦鍖?        run: |
+          set -euo pipefail
+          cd "$ROOT"
+          chmod +x build.sh
+          ./build.sh
+          ls -la ds1832.ipa
+
+      - name: 涓婁紶 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: ds1832-ipa
+          path: ${{ env.ROOT }}/ds1832.ipa
+          if-no-files-found: error
